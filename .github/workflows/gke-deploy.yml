@@ -1,0 +1,78 @@
+name: Build and Deploy to GKE
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: ${{ secrets.GKE_PROJECT }}
+  GKE_CLUSTER: demo-gke-cluster    
+  GKE_ZONE: us-central1   
+  IMAGE: demo-app
+
+jobs:
+  setup-build-publish-deploy:
+    name: Setup, Build, Publish, and Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 1. Setup Google Cloud credentials
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    # 2. Setup Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    # 3. Terraform Init and Apply
+    - name: Terraform Init
+      run: terraform init
+      working-directory: ./terraform
+
+    - name: Terraform Apply
+      run: terraform apply -auto-approve -var="project_id=$PROJECT_ID"
+      working-directory: ./terraform
+
+    # 4. Configure Docker to use the gcloud command-line tool as a credential helper
+    - run: |-
+        gcloud --quiet auth configure-docker
+
+    # 5. Build the Docker image
+    - name: Build
+      run: |-
+        docker build \
+          --tag "gcr.io/$PROJECT_ID/$IMAGE:$GITHUB_SHA" \
+          .
+
+    # 6. Push the Docker image to Google Container Registry Let
+    - name: Publish
+      run: |-
+        docker push "gcr.io/$PROJECT_ID/$IMAGE:$GITHUB_SHA"
+
+    # 7. Get the GKE credentials so we can deploy to the cluster
+    - name: Set up GKE credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ env.GKE_CLUSTER }}
+        location: ${{ env.GKE_ZONE }}
+
+    # 8. Deploy to the GKE cluster
+    - name: Deploy
+      run: |-
+        # Replace the TARGET_IMAGE string in deployment.yaml
+        sed -i "s|TARGET_IMAGE|gcr.io/$PROJECT_ID/$IMAGE:$GITHUB_SHA|g" k8s/deployment.yaml
+        
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+        kubectl rollout status deployment/demo-app-deployment
+        kubectl get services -o wide
